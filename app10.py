@@ -949,6 +949,10 @@ def render_map(df_map: pd.DataFrame, window_days: int, risk_thr: float, asof_yea
 # =========================
 # PDF report generation (multi-page)
 # =========================
+# =========================
+# PDF report generation (multi-page) — UPDATED (bigger report)
+# Replace ONLY your existing build_pdf_report_bytes() with this version.
+# =========================
 def build_pdf_report_bytes(
     filtered_assets: pd.DataFrame,
     events_window: pd.DataFrame,
@@ -961,6 +965,15 @@ def build_pdf_report_bytes(
 ) -> bytes:
     if not HAS_PDF:
         return b""
+
+    # ---------- guardrails ----------
+    filtered_assets = filtered_assets.copy() if filtered_assets is not None else pd.DataFrame()
+    events_window = events_window.copy() if events_window is not None else pd.DataFrame()
+    kpi_by_type = kpi_by_type.copy() if kpi_by_type is not None else pd.DataFrame()
+    scenario_summary = scenario_summary.copy() if scenario_summary is not None else pd.DataFrame()
+    scenario_selected = scenario_selected.copy() if scenario_selected is not None else pd.DataFrame()
+    merged_quality = merged_quality.copy() if merged_quality is not None else pd.DataFrame()
+    savings_table = savings_table.copy() if savings_table is not None else pd.DataFrame()
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -982,93 +995,365 @@ def build_pdf_report_bytes(
         canvas.saveState()
         canvas.setFont("Helvetica", 9)
         canvas.setFillGray(0.35)
-        canvas.drawString(doc_.leftMargin, 0.55 * inch, f"Generated: {meta['generated_ts']}")
+        canvas.drawString(doc_.leftMargin, 0.55 * inch, f"Generated: {meta.get('generated_ts','')}")
         canvas.drawRightString(LETTER[0] - doc_.rightMargin, 0.55 * inch, f"Page {doc_.page}")
         canvas.restoreState()
 
+    def _tbl_style(header_hex="#111827", font_size_header=9.2, font_size_body=8.6):
+        return TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_hex)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), font_size_header),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.lightgrey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTSIZE", (0, 1), (-1, -1), font_size_body),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor("#f3f4f6")]),
+        ])
+
+    def _p(txt: str) -> Paragraph:
+        return Paragraph(str(txt), styles["Bodyx"])
+
     story = []
 
+    # =========================
+    # Cover / Meta
+    # =========================
     story.append(Paragraph("SmartWay ITS — Asset Intelligence Platform Report", styles["H1x"]))
-    story.append(Paragraph(f"<b>Generated:</b> {meta['generated_ts']}", styles["Bodyx"]))
+    story.append(Paragraph(f"<b>Generated:</b> {meta.get('generated_ts','')}", styles["Bodyx"]))
     story.append(Paragraph(f"<b>As-of date:</b> {meta.get('asof_date','')}", styles["Bodyx"]))
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        f"<b>Prepared by:</b> {meta['prepared_by']} &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<b>Role:</b> {meta['role']} &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<b>Department:</b> {meta['department']}<br/>"
-        f"<b>Organization:</b> {meta['organization']}",
+        f"<b>Prepared by:</b> {meta.get('prepared_by','')} &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<b>Role:</b> {meta.get('role','')} &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<b>Department:</b> {meta.get('department','')}<br/>"
+        f"<b>Organization:</b> {meta.get('organization','')}",
         styles["Bodyx"]
     ))
     story.append(Spacer(1, 10))
 
     settings_txt = (
         f"<b>Dashboard settings</b><br/>"
-        f"Seed: {meta['seed']}<br/>"
-        f"KPI window: {meta['window_days']} days<br/>"
-        f"Min availability: {meta['min_avail']:.2f}<br/>"
-        f"Risk threshold: {meta['risk_thr']:.2f}<br/>"
+        f"Seed: {meta.get('seed','')}<br/>"
+        f"KPI window: {meta.get('window_days','')} days<br/>"
+        f"Min availability: {meta.get('min_avail', 0):.2f}<br/>"
+        f"Risk threshold: {meta.get('risk_thr', 0):.2f}<br/>"
     )
     story.append(Paragraph(settings_txt, styles["Bodyx"]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
 
     filters_txt = (
         f"<b>Filters</b><br/>"
-        f"Regions: {', '.join(meta['regions'])}<br/>"
-        f"Asset types: {', '.join(meta['types'])}<br/>"
-        f"Corridors: {', '.join(meta['corridors'])}<br/>"
-        f"Status(window): {', '.join(meta['status'])}<br/>"
+        f"Regions: {', '.join([str(x) for x in meta.get('regions', [])])}<br/>"
+        f"Asset types: {', '.join([str(x) for x in meta.get('types', [])])}<br/>"
+        f"Corridors: {', '.join([str(x) for x in meta.get('corridors', [])])}<br/>"
+        f"Status(window): {', '.join([str(x) for x in meta.get('status', [])])}<br/>"
     )
     story.append(Paragraph(filters_txt, styles["Bodyx"]))
     story.append(Spacer(1, 10))
 
-    total_assets = len(filtered_assets)
-    avg_avail = float(filtered_assets["availability_window"].mean()) if total_assets else 0.0
-    high_risk_n = int((filtered_assets["risk_score"] >= float(meta.get("risk_thr", 0.8))).sum()) if total_assets else 0
-    non_comp_n = int(filtered_assets["config_noncompliance_window"].sum()) if total_assets else 0
-    overdue_n = int((filtered_assets["remaining_life_years"] <= 0).sum()) if total_assets else 0
-    due_12m_n = int(((filtered_assets["remaining_life_years"] > 0) & (filtered_assets["remaining_life_years"] <= 1)).sum()) if total_assets else 0
+    # =========================
+    # Executive Snapshot
+    # =========================
+    total_assets = int(len(filtered_assets))
+    window_days = int(meta.get("window_days", 90))
+    risk_thr = float(meta.get("risk_thr", 0.80))
+    asof_year = int(meta.get("asof_year", datetime.now().year))
+
+    if total_assets:
+        avg_avail = float(filtered_assets.get("availability_window", pd.Series([0.0])).mean())
+        high_risk_n = int((filtered_assets.get("risk_score", pd.Series([0.0])) >= risk_thr).sum())
+        non_comp_n = int(filtered_assets.get("config_noncompliance_window", pd.Series([0])).sum())
+        overdue_n = int((filtered_assets.get("remaining_life_years", pd.Series([999])) <= 0).sum())
+        due_12m_n = int(((filtered_assets.get("remaining_life_years", pd.Series([999])) > 0) &
+                         (filtered_assets.get("remaining_life_years", pd.Series([999])) <= 1)).sum())
+    else:
+        avg_avail = 0.0
+        high_risk_n = 0
+        non_comp_n = 0
+        overdue_n = 0
+        due_12m_n = 0
 
     story.append(Paragraph("Executive Snapshot", styles["H2x"]))
     snap = [
         ["Metric", "Value"],
         ["Assets in scope", f"{total_assets:,}"],
-        [f"Avg availability ({meta['window_days']}d)", f"{avg_avail*100:.1f}%"],
+        [f"Avg availability ({window_days}d)", f"{avg_avail*100:.1f}%"],
         ["High-risk assets", f"{high_risk_n:,}"],
         ["Config non-compliant (window)", f"{non_comp_n:,}"],
         ["Renewal overdue", f"{overdue_n:,}"],
         ["Due within 12 months", f"{due_12m_n:,}"],
     ]
-    t = Table(snap, colWidths=[2.7*inch, 3.7*inch])
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 10),
-        ("GRID", (0,0), (-1,-1), 0.4, colors.lightgrey),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.HexColor("#f3f4f6")]),
-    ]))
+    t = Table(snap, colWidths=[2.7 * inch, 3.7 * inch])
+    t.setStyle(_tbl_style(header_hex="#111827", font_size_header=10, font_size_body=9.2))
     story.append(t)
-    story.append(Spacer(1, 10))
 
+    # =========================
+    # Savings Table
+    # =========================
+    story.append(Spacer(1, 10))
     story.append(Paragraph("AI vs Traditional planning savings (estimate)", styles["H2x"]))
-    if savings_table is not None and len(savings_table):
+    if len(savings_table):
         rows = [savings_table.columns.tolist()] + savings_table.values.tolist()
-        tsv = Table(rows, colWidths=[2.2*inch, 1.7*inch, 1.7*inch, 1.5*inch])
-        tsv.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0f766e")),
-            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE", (0,0), (-1,0), 9),
-            ("GRID", (0,0), (-1,-1), 0.35, colors.lightgrey),
-            ("VALIGN", (0,0), (-1,-1), "TOP"),
-            ("FONTSIZE", (0,1), (-1,-1), 8.6),
-            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.HexColor("#f3f4f6")]),
-        ]))
+        tsv = Table(rows, colWidths=[2.2 * inch, 1.7 * inch, 1.7 * inch, 1.5 * inch], repeatRows=1)
+        tsv.setStyle(_tbl_style(header_hex="#0f766e", font_size_header=9.2, font_size_body=8.6))
         story.append(tsv)
     else:
         story.append(Paragraph("Savings table not available for current filter scope.", styles["Bodyx"]))
 
+    # =========================
+    # Model Fitness (table form so PDF stays self-contained)
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph("Model fitness (AUC & Accuracy vs risk threshold)", styles["H2x"]))
+
+    perf_tbl = None
+    try:
+        if ("label_outage90" in filtered_assets.columns) and ("risk_score" in filtered_assets.columns) and total_assets > 50:
+            y_true = filtered_assets["label_outage90"].astype(int).values
+            s_score = filtered_assets["risk_score"].astype(float).values
+            thr_grid = np.round(np.arange(0.30, 0.951, 0.05), 2)
+            perf_df = build_perf_curves_dynamic(
+                y=y_true,
+                score=s_score,
+                thr_grid=thr_grid,
+                seed_=7,
+                auc_band=(0.70, 0.90),
+                acc_band=(0.80, 0.90),
+            )
+            if perf_df is not None and not perf_df.empty:
+                # include a small table (last 10–14 rows)
+                show_df = perf_df.copy()
+                show_df["threshold"] = show_df["threshold"].round(2)
+                show_df["auc_test"] = show_df["auc_test"].round(3)
+                show_df["auc_train"] = show_df["auc_train"].round(3)
+                show_df["acc_test"] = show_df["acc_test"].round(3)
+                show_df["acc_train"] = show_df["acc_train"].round(3)
+
+                rows = [["Threshold", "AUC (test)", "AUC (train)", "Acc (test)", "Acc (train)"]]
+                for _, r in show_df.iterrows():
+                    rows.append([
+                        f"{r['threshold']:.2f}",
+                        f"{r['auc_test']:.3f}",
+                        f"{r['auc_train']:.3f}",
+                        f"{r['acc_test']:.3f}",
+                        f"{r['acc_train']:.3f}",
+                    ])
+                perf_tbl = Table(rows, colWidths=[1.0*inch, 1.25*inch, 1.25*inch, 1.25*inch, 1.25*inch], repeatRows=1)
+                perf_tbl.setStyle(_tbl_style(header_hex="#1f2937", font_size_header=9.2, font_size_body=8.6))
+    except Exception:
+        perf_tbl = None
+
+    if perf_tbl is not None:
+        story.append(Paragraph(
+            f"Target operating point uses dashboard risk threshold = <b>{risk_thr:.2f}</b>. "
+            f"Train AUC > Test AUC is enforced by design (demo).",
+            styles["Bodyx"]
+        ))
+        story.append(Spacer(1, 6))
+        story.append(perf_tbl)
+    else:
+        story.append(Paragraph("Model fitness table not available for this scope.", styles["Bodyx"]))
+
+    # =========================
+    # Priority Actions (Top risk assets)
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph("Priority Actions (top risk-ranked assets)", styles["H2x"]))
+
+    if total_assets and ("risk_score" in filtered_assets.columns):
+        top = (
+            filtered_assets
+            .sort_values(["risk_score", "criticality_score"], ascending=False)
+            .head(25)
+            .copy()
+        )
+
+        rows = [[
+            "Asset", "Type", "Status(window)", "Risk", "Avail", "Outages", "Due", "Urgency", "Primary action"
+        ]]
+
+        for _, r in top.iterrows():
+            try:
+                urg, acts = recommended_action(r, risk_thr=risk_thr, asof_year=asof_year)
+                primary = acts[0] if acts else "—"
+            except Exception:
+                urg, primary = "Routine", "—"
+
+            rows.append([
+                str(r.get("asset_uid", "—")),
+                str(r.get("asset_type", "—")),
+                str(r.get("status_window", r.get("status", "—"))),
+                f"{float(r.get('risk_score', 0.0))*100:.1f}%",
+                f"{float(r.get('availability_window', 0.0))*100:.1f}%",
+                f"{int(r.get('outages_count_window', 0))}",
+                f"{int(r.get('due_year', asof_year))}",
+                str(urg),
+                Paragraph(str(primary), styles["Smallx"]),
+            ])
+
+        tpa = Table(
+            rows,
+            colWidths=[0.85*inch, 0.65*inch, 0.95*inch, 0.55*inch, 0.55*inch, 0.55*inch, 0.50*inch, 0.65*inch, 2.15*inch],
+            repeatRows=1
+        )
+        tpa.setStyle(_tbl_style(header_hex="#111827", font_size_header=8.8, font_size_body=8.0))
+        story.append(tpa)
+    else:
+        story.append(Paragraph("No assets available for priority actions.", styles["Bodyx"]))
+
+    # =========================
+    # Operations & Maintenance (window)
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph(f"Operations & Maintenance ({window_days}-day window)", styles["H2x"]))
+
+    if len(events_window):
+        total_events = int(len(events_window))
+        total_downtime = float(events_window.get("downtime_hours", pd.Series([0.0])).sum())
+        avg_mttr_win = float(events_window.get("downtime_hours", pd.Series(dtype=float)).mean()) if total_events else np.nan
+        total_cost = float(events_window.get("maintenance_cost_usd", pd.Series([0.0])).sum())
+
+        ops_rows = [
+            ["Metric", "Value"],
+            ["Events in window", f"{total_events:,}"],
+            ["Total downtime (hours)", f"{total_downtime:,.1f}"],
+            ["Average MTTR per event (hours)", ("—" if pd.isna(avg_mttr_win) else f"{avg_mttr_win:,.2f}")],
+            ["Total maintenance cost (USD)", fmt_money(total_cost)],
+        ]
+        tops = Table(ops_rows, colWidths=[2.7 * inch, 3.7 * inch])
+        tops.setStyle(_tbl_style(header_hex="#111827", font_size_header=10, font_size_body=9.2))
+        story.append(tops)
+        story.append(Spacer(1, 8))
+
+        # Top reasons
+        if "reason" in events_window.columns:
+            rsn = events_window["reason"].astype(str).value_counts().head(8).reset_index()
+            rsn.columns = ["Reason", "Events"]
+            rows = [rsn.columns.tolist()] + rsn.values.tolist()
+            tr = Table(rows, colWidths=[4.4 * inch, 2.0 * inch], repeatRows=1)
+            tr.setStyle(_tbl_style(header_hex="#0f766e", font_size_header=9.2, font_size_body=8.6))
+            story.append(Paragraph("Top event drivers", styles["Bodyx"]))
+            story.append(tr)
+    else:
+        story.append(Paragraph("No maintenance/outage events in the selected window for this scope.", styles["Bodyx"]))
+
+    # =========================
+    # KPI by Asset Type
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph("KPIs by asset type (window-based)", styles["H2x"]))
+
+    if len(kpi_by_type):
+        # Keep only the most useful columns if present
+        keep_cols = [c for c in [
+            "asset_type", "assets",
+            "avg_availability_pct", "avg_mttr", "avg_risk_pct",
+            "non_compliant"
+        ] if c in kpi_by_type.columns]
+
+        kshow = kpi_by_type[keep_cols].copy()
+
+        # format
+        for c in ["avg_availability_pct", "avg_risk_pct", "avg_mttr"]:
+            if c in kshow.columns:
+                kshow[c] = pd.to_numeric(kshow[c], errors="coerce").round(2)
+
+        rows = [kshow.columns.tolist()] + kshow.values.tolist()
+        tk = Table(rows, colWidths=[1.1*inch, 0.9*inch, 1.35*inch, 1.05*inch, 1.15*inch, 1.0*inch][:len(kshow.columns)], repeatRows=1)
+        tk.setStyle(_tbl_style(header_hex="#111827", font_size_header=9.2, font_size_body=8.6))
+        story.append(tk)
+    else:
+        story.append(Paragraph("KPI-by-type table not available for this scope.", styles["Bodyx"]))
+
+    # =========================
+    # Renewal & Replacement Planning
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph("Renewal & Replacement Planning", styles["H2x"]))
+
+    if len(scenario_summary):
+        s = scenario_summary.copy()
+        # keep first 10 rows to fit nicely
+        show = s.head(12).copy()
+
+        cols = [c for c in ["year", "due_assets", "replaced_assets", "annual_spend_usd", "backlog_assets"] if c in show.columns]
+        show = show[cols]
+
+        # format currency
+        if "annual_spend_usd" in show.columns:
+            show["annual_spend_usd"] = show["annual_spend_usd"].apply(fmt_money)
+
+        rows = [show.columns.tolist()] + show.values.tolist()
+        ts = Table(rows, colWidths=[1.0*inch, 1.0*inch, 1.05*inch, 1.55*inch, 1.0*inch], repeatRows=1)
+        ts.setStyle(_tbl_style(header_hex="#0f766e", font_size_header=9.2, font_size_body=8.6))
+        story.append(Paragraph("Scenario summary (first years)", styles["Bodyx"]))
+        story.append(ts)
+
+        # brief selected sample
+        if len(scenario_selected):
+            story.append(Spacer(1, 8))
+            story.append(Paragraph("Example selected assets (top 12 by risk)", styles["Bodyx"]))
+            ss = scenario_selected.copy()
+            ss = ss.sort_values(["selected_year", "risk_score"], ascending=[True, False]).head(12)
+            keep = [c for c in ["selected_year", "asset_uid", "asset_type", "risk_score", "due_year", "replacement_cost_usd"] if c in ss.columns]
+            ss = ss[keep]
+            if "risk_score" in ss.columns:
+                ss["risk_score"] = (pd.to_numeric(ss["risk_score"], errors="coerce") * 100.0).round(1).astype(str) + "%"
+            if "replacement_cost_usd" in ss.columns:
+                ss["replacement_cost_usd"] = ss["replacement_cost_usd"].apply(fmt_money)
+
+            rows = [ss.columns.tolist()] + ss.values.tolist()
+            tss = Table(rows, colWidths=[0.9*inch, 1.3*inch, 0.9*inch, 0.8*inch, 0.8*inch, 1.4*inch][:len(ss.columns)], repeatRows=1)
+            tss.setStyle(_tbl_style(header_hex="#111827", font_size_header=9.0, font_size_body=8.4))
+            story.append(tss)
+    else:
+        story.append(Paragraph("Scenario planning outputs not available for this scope.", styles["Bodyx"]))
+
+    # =========================
+    # Data Quality & Reconciliation
+    # =========================
+    story.append(PageBreak())
+    story.append(Paragraph("Data Quality & Reconciliation (cross-system)", styles["H2x"]))
+
+    if len(merged_quality):
+        type_conf = int(merged_quality.get("type_conflict", pd.Series([False])).sum())
+        loc_conf = int(merged_quality.get("loc_conflict", pd.Series([False])).sum())
+
+        dq_rows = [
+            ["Metric", "Value"],
+            ["Union records (unique asset_uids)", f"{len(merged_quality):,}"],
+            ["Type conflicts", f"{type_conf:,}"],
+            ["Location conflicts", f"{loc_conf:,}"],
+        ]
+        tdq = Table(dq_rows, colWidths=[2.7*inch, 3.7*inch])
+        tdq.setStyle(_tbl_style(header_hex="#111827", font_size_header=10, font_size_body=9.2))
+        story.append(tdq)
+
+        # small sample table
+        try:
+            conflicts = merged_quality[(merged_quality.get("type_conflict", False)) | (merged_quality.get("loc_conflict", False))].copy()
+            if len(conflicts):
+                story.append(Spacer(1, 8))
+                story.append(Paragraph("Conflict samples (first 12)", styles["Bodyx"]))
+                cols = [c for c in [
+                    "asset_uid",
+                    "TMS_ATMS_asset_type", "CMMS_asset_type", "FIN_asset_type", "VEN_asset_type",
+                    "type_conflict", "loc_conflict", "loc_spread"
+                ] if c in conflicts.columns]
+                show = conflicts[cols].head(12)
+                rows = [show.columns.tolist()] + show.values.tolist()
+                tc = Table(rows, colWidths=[1.0*inch, 0.9*inch, 0.9*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch][:len(show.columns)], repeatRows=1)
+                tc.setStyle(_tbl_style(header_hex="#0f766e", font_size_header=8.6, font_size_body=7.8))
+                story.append(tc)
+        except Exception:
+            pass
+    else:
+        story.append(Paragraph("Reconciliation outputs not available.", styles["Bodyx"]))
+
+    # =========================
+    # End
+    # =========================
     story.append(Spacer(1, 10))
     story.append(Paragraph("End of report.", styles["Smallx"]))
 
